@@ -24,10 +24,12 @@ import catboost as cat
 from lightgbm import LGBMRegressor, LGBMClassifier
 from catboost import CatBoostRegressor, CatBoostClassifier
 from xgboost import XGBRegressor, XGBClassifier
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.ensemble import VotingClassifier, VotingRegressor
 possible_models = [LGBMRegressor, LGBMClassifier,
                    CatBoostRegressor, CatBoostClassifier,
                    XGBRegressor, XGBClassifier,
+                   RandomForestRegressor, RandomForestClassifier,
                    VotingRegressor, VotingClassifier]
 
 import numpy as np
@@ -60,7 +62,7 @@ class Optunization:
 
         Parameters:
 
-            model (object): A Gradient Boosting model. Can be: LightGBM, CatBoost, XGBoost or other.
+            model (object): A ML Model. Can be: LightGBM, CatBoost, XGBoost, RandomForest or other.
             
             model_hyperparams (dict): The model's hyperparams search space dictionary to be used by Optuna.
                                       Key format: hyperparam name, as expected by the model's constructor.
@@ -125,6 +127,7 @@ class Optunization:
         self.lgb_eval = None
         self.xgb_eval = None
         self.cat_eval = None
+        self.rf_eval = None
         self.fit_kwargs = None
 
         self.xgb_callback = None
@@ -230,15 +233,24 @@ class Optunization:
                     self.fit_kwargs["callbacks"] = [self.xgb_callback]
             
             self.model.__init__(**params, device = self.device, seed = self.seed)
-        
 
+
+        elif self.model.__module__ == "sklearn.ensemble._forest":
+
+            self.abrv = "RF"
+
+
+            if self.eval_metric is not None:
+                self.rf_eval = copy.deepcopy(self.eval_metric)
+
+            self.model.__init__(**params, random_state = self.seed)
 
         # Supress all fit verbosity, lgbm warnings etc.
         with open(os.devnull, 'w') as devnull:
              with contextlib.redirect_stdout(devnull):
 
-#         with do_nothing():
-#              with do_nothing():
+        # with do_nothing():
+        #      with do_nothing():
 
                 score = 0
                 metr_name = self.eval_metric.name
@@ -278,7 +290,10 @@ class Optunization:
                                            eval_metric = self.xgb_eval,
                                            callbacks = callbacks,
                                           )
-                            
+
+                        elif self.abrv == "RF":
+                            self.model.fit(fold["train"][0],
+                                           fold["train"][1])
 
                         else:
 
@@ -346,16 +361,20 @@ class Optunization:
 
                     # Train
 
-                    self.model.fit(self.data[0]["train"][0],
-                                   self.data[0]["train"][1], 
-                                   eval_set = [tuple(self.data[0]["val"])],
-                                   **self.fit_kwargs)
-                    
+                    if self.abrv == "RF":
+                        self.model.fit(self.data[0]["train"][0],
+                                       self.data[0]["train"][1])
+                    else:
+                        self.model.fit(self.data[0]["train"][0],
+                                       self.data[0]["train"][1],
+                                       eval_set = [tuple(self.data[0]["val"])],
+                                       **self.fit_kwargs)
+
 
                     # Compute train-val metrics and optimized metric (with overfitting mitigation)
 
                     train_metric = self.eval_metric.score(y_true = self.data[0]["train"][1],
-                                                        y_pred = self.model.predict(self.data[0]["train"][0]).squeeze())
+                                                          y_pred = self.model.predict(self.data[0]["train"][0]).squeeze())
                     
                     val_metric = self.eval_metric.score(y_true = self.data[0]["val"][1], 
                                                         y_pred = self.model.predict(self.data[0]["val"][0]).squeeze())
@@ -384,16 +403,19 @@ class Optunization:
 
                 if self.mode == "train":
 
-                    # Train 
+                    # Train
 
-                    self.model.fit(self.data[0]["train"][0], self.data[0]["train"],
-                                   eval_set = [tuple(self.data[0]["train"])], 
-                                  **self.fit_kwargs)
-                    
+                    if self.abrv == "RF":
+                        self.model.fit(self.data[0]["train"][0], self.data[0]["train"])
+                    else:
+                        self.model.fit(self.data[0]["train"][0], self.data[0]["train"],
+                                       eval_set = [tuple(self.data[0]["train"])],
+                                       **self.fit_kwargs)
+
                     # Compute train metric
 
                     train_metric = self.eval_metric.score(y_true = self.data[0]["train"][1], 
-                                                        y_pred = self.model.predict(self.data[0]["train"][0]).squeeze())
+                                                          y_pred = self.model.predict(self.data[0]["train"][0]).squeeze())
                     
                     # Use train metric for optimization
                     score = train_metric
@@ -430,7 +452,11 @@ class Optunization:
                         effective_n_estimators = (int(np.mean(np.array(effective_n_estimators_list)).round()) 
                                                 if effective_n_estimators_list is not None 
                                                 else self.model.get_best_iteration())
-                        
+
+                    elif self.abrv == "RF":
+
+                        effective_n_estimators = self.model.n_estimators
+
                     trial.set_user_attr("params_n_estimators_", effective_n_estimators)
 
 
@@ -465,7 +491,7 @@ class Optunization:
 
         """
 
-        Retrieves GBM model constructor hyperparams from Optuna trials.
+        Retrieves model constructor hyperparams from Optuna trials.
 
         Returns a list of dictionaries.
 
@@ -495,6 +521,9 @@ class Optunization:
             elif self.model.__module__ == "xgboost.sklearn":
                 trial_params["device"] = self.device
                 trial_params["seed"] = self.seed
+
+            elif self.model.__module__ == "sklearn.ensemble._forest":
+                trial_params["random_state"] = self.seed
 
             params_list.append(trial_params)
 
