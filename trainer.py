@@ -4,6 +4,7 @@ from preprocessing import PreprocessingTool
 from dataset import TabularDataset
 from scorer import Scorer
 from optimizer import Optunization
+from hyperparams_configs import DEFAULT_CONFIG
 
 import numpy as np
 import pandas as pd
@@ -22,11 +23,15 @@ import catboost as cat
 from lightgbm import LGBMRegressor, LGBMClassifier
 from catboost import CatBoostRegressor, CatBoostClassifier
 from xgboost import XGBRegressor, XGBClassifier
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.linear_model import SGDRegressor, SGDClassifier
 from sklearn.ensemble import VotingClassifier, VotingRegressor
 
 possible_models = [LGBMRegressor, LGBMClassifier,
                    CatBoostRegressor, CatBoostClassifier,
                    XGBRegressor, XGBClassifier,
+                   RandomForestRegressor, RandomForestClassifier,
+                   SGDRegressor, SGDClassifier,
                    VotingRegressor, VotingClassifier,
                    ElasticNet, ElasticNetCV, LogisticRegression, Ridge]
 
@@ -69,60 +74,14 @@ class Trainer:
                  eval_metric: Optional[Scorer] = None,
                  early_stopping_rounds = 0, # off
                  of_mitigation_level = 0.2,
-                 models = ["LGB", "XGB", "CAT"], # ["SKL", "ADA"]
-
-                 hyperparams = {
-                    "XGB": {
-                        "learning_rate": (0.005, 0.3, "float_log"), 
-                        "n_estimators": (50, 1000, "int"),
-                        "max_depth": (3, 12, "int"),
-                        "min_child_weight": (1, 10, "int"),
-                        "subsample": (0.5, 1.0, "float"),
-                        "colsample_bytree": (0.5, 1.0, "float"),
-                        "reg_lambda": (1e-3, 10, "float_log"), 
-                        "reg_alpha": (1e-3, 5, "float_log"),  
-                        "gamma": (0.0, 1.0, "float"), 
-                        "scale_pos_weight": (1e-3, 50.0, "float_log"),
-                        "verbosity": 0,
-                        "priority": 100
-                    },
-                    
-                    "LGB": {
-                        "metric": (["None"], "cat"),
-                        "learning_rate": (0.005, 0.2, "float_log"),  
-                        "n_estimators": (50, 1000, "int"),
-                        "max_depth": (3, 20, "int"),
-                        "num_leaves": (20, 255, "int"),
-                        "feature_fraction": (0.5, 1.0, "float"),
-                        "bagging_fraction": (0.5, 1.0, "float"),
-                        "lambda_l1": (1e-3, 10.0, "float_log"), 
-                        "lambda_l2": (1e-3, 10.0, "float_log"),  
-                        "min_child_samples": (5, 100, "int"),
-                        "boost_from_average": ([True, False], "cat"),
-                        "verbosity": -1,
-                        "priority": 100
-                    },
-                    
-                    "CAT": {
-                        "learning_rate": (0.005, 0.2, "float_log"),  
-                        "n_estimators": (50, 1000, "int"),
-                        "max_depth": (4, 10, "int"),
-                        "reg_lambda": (1e-3, 10.0, "float_log"), 
-                        "random_strength": (1e-3, 10.0, "float_log"),  
-                        "bagging_temperature": (0.0, 1.0, "float"),
-                        "border_count": (32, 255, "int"),
-                        "min_data_in_leaf": (1, 50, "int"), 
-                        "verbose": False,
-                        "priority": 100
-                    }
-                },     
-
+                 models = ["LGB", "XGB", "CAT", "RF", "SGD_LINEAR"], # ["SKL", "ADA"]
+                 hyperparams = DEFAULT_CONFIG,
                  use_gpu = False,
                  use_cuda = True,
                  n_trials = 10000, # max
                  timeout = 3000,
                  seed = 42,
-                 select_top = 5,
+                 select_top = 3,
                  train_meta = True,
                  meta_timeout = 600,
                  save_path = "saved_trainer.pkl"):
@@ -139,7 +98,7 @@ class Trainer:
                 Used in CV hyperparam-tuning (with early stopping) and for refitting models at end on
                 the entire data.
 
-                eval_dataset (TabularDataset): A TabularDataset used exlusively for evaluation
+                eval_dataset (TabularDataset): A TabularDataset used exclusively for evaluation
                 purposes: generating final leaderboard (including Ensemble model(s)).
 
                 eval_metric (Scorer): A Scorer instance with the eval metric chosen to be used 
@@ -162,7 +121,9 @@ class Trainer:
                                     * "LGB" for LGBMRegressor / LGBMClassifier
                                     * "CAT" for CatBoostRegressor / CatBoostClassifier
                                     * "XGB" for XGBRegressor / XGBClassifer
-                                Default is ["LGB", "XGB", "CAT"].
+                                    * "RF" for RandomForestRegressor / RandomForestClassifier
+                                    * "SGD_LINEAR" for SGDRegressor / SGDClassifier
+                                Default is ["LGB", "XGB", "CAT", "RF", "SGD_LINEAR"].
 
                 hyperparams (dict): A dictionary of dictionaries with default hyperparameter search space for each model.
                                     Each model dictionary has the following structure:
@@ -186,7 +147,7 @@ class Trainer:
                                 Default is 1000 (as high as possible).
 
                 timeout (int): Number of seconds after which all GBMs models tuning stops automatically.
-                               Default is 3000s or 50mins.
+                               Default is 3000s or 50 mins.
 
                 seed (int): Random state seed to use for training the model. It ensures a level of reproducibility.
                             Default is 42.
@@ -234,6 +195,8 @@ class Trainer:
         self.lgb_lb = None
         self.cat_lb = None
         self.xgb_lb = None
+        self.rf_lb = None
+        self.sgd_lin_lb = None
         self.leaderboard = None
         self.eval_lb = None
         self.ensemble = None
@@ -399,6 +362,80 @@ class Trainer:
             print(384 * "-", "\n\n")
 
 
+        if "RF" in self.models:
+
+            print("OPTUNING RF MODEL...")
+
+            # Task specific additional params
+
+            if self.pb_type == "regression":
+                rf_model = RandomForestRegressor()
+            else:
+                rf_model = RandomForestClassifier()
+
+
+            # Find best hyperparams with Optuna and display top models
+
+            self.rf_optuner = Optunization(model=rf_model,
+                                           model_hyperparams=self.hyperparams["RF"],
+                                           data=self.processed_data["data"],
+                                           eval_metric=self.eval_metric,
+                                           early_stopping_rounds=self.early_stopping_rounds,
+                                           of_mitigation_level=self.of_mitigation_level,
+                                           use_gpu=self.use_gpu,
+                                           use_cuda=self.use_cuda,
+                                           n_trials=self.n_trials,
+                                           timeout=self.hyperparams["RF"]["priority"] * self.timeout,
+                                           seed=self.seed
+                                          )
+
+            self.rf_lb = self.rf_optuner.optimize()
+            self.mode = self.rf_optuner.mode
+            self.user_attrs = self.rf_optuner.user_attrs
+
+            print(f"\n\nFinished training. TOP {self.select_top} models are:")
+            display(self.rf_lb.head(self.select_top))
+            print(384 * "-", "\n\n")
+
+
+
+        if "SGD_LINEAR" in self.models:
+
+            print("OPTUNING SGD LINEAR MODEL...")
+
+            # Task specific additional params
+
+            if self.pb_type == "regression":
+                sgd_lin_model = SGDRegressor()
+            else:
+                self.hyperparams["SGD_LINEAR"]["loss"] = (["hinge", "log_loss", "modified_huber", "squared_hinge", "perceptron"], "cat")
+                sgd_lin_model = SGDClassifier()
+
+            # Find best hyperparams with Optuna and display top models
+
+            self.sgd_lin_optuner = Optunization(model=sgd_lin_model,
+                                                model_hyperparams=self.hyperparams["SGD_LINEAR"],
+                                                data=self.processed_data["data"],
+                                                eval_metric=self.eval_metric,
+                                                early_stopping_rounds=self.early_stopping_rounds,
+                                                of_mitigation_level=self.of_mitigation_level,
+                                                use_gpu=self.use_gpu,
+                                                use_cuda=self.use_cuda,
+                                                n_trials=self.n_trials,
+                                                timeout=self.hyperparams["SGD_LINEAR"]["priority"] * self.timeout,
+                                                seed=self.seed
+                                                )
+
+            self.sgd_lin_lb = self.sgd_lin_optuner.optimize()
+            self.mode = self.sgd_lin_optuner.mode
+            self.user_attrs = self.sgd_lin_optuner.user_attrs
+
+            print(f"\n\nFinished training. TOP {self.select_top} models are:")
+            display(self.sgd_lin_lb.head(self.select_top))
+            print(384 * "-", "\n\n")
+
+
+
 
         # Train meta-learner if possible
         if self.train_meta and self.dataset.preprocessor.val_folds and not self.dataset.preprocessor.forecasting:
@@ -456,7 +493,7 @@ class Trainer:
         self.meta_dict = {}
 
         # Add models as keys with initial value None using ID column
-        for df in [self.xgb_lb, self.lgb_lb, self.cat_lb]:
+        for df in [self.xgb_lb, self.lgb_lb, self.cat_lb, self.rf_lb, self.sgd_lin_lb]:
             if df is not None:
                 for _, row in df.head(self.select_top).iterrows():
                     model_id = row["id"]  # Use the ID column value
@@ -490,85 +527,11 @@ class Trainer:
             
 
 
-    # def _train_meta_learner(self):
-
-    #     """
-    #     Creates and trains an ElasticNet meta-learner using out-of-fold probabilities from various GBMs models.
-    #     Uses Optuna for hyperparameter optimization.
-    #     """
-        
-    #     # Initialize list to collect predictions and ground truth labels
-    #     all_preds = []
-    #     ground_truth = None
-
-    #     # Extract predictions and ground truth from the meta_dict dictionary
-    #     for model_key, data in self.meta_dict.items():
-    #         preds = data["oof_preds"]["predictions"]
-    #         labels = data["oof_preds"]["ground_truths"]
-
-    #         # Set ground truth labels from the first model (since they are the same across models)
-    #         if ground_truth is None:
-    #             ground_truth = labels
-            
-    #         all_preds.append(preds)
-
-    #     # Ensure all predictions are 2D arrays (n_samples, 1) before stacking
-    #     all_preds = [preds.reshape(-1, 1) if preds.ndim == 1 else preds for preds in all_preds]
-        
-    #     # Convert lists to numpy arrays
-    #     X = np.hstack(all_preds)  # Shape (n_samples, n_models * n_predicted_values)
-    #     y = ground_truth  # Shape (n_samples,)
-
-    #     # Scorer
-    #     meta_scorer = make_scorer(self.eval_metric.score, 
-    #                               greater_is_better=self.eval_metric.greater_is_better)
-
-    #     def objective(trial):
-    #         # Define the hyperparameters to optimize
-    #         alpha = trial.suggest_float('alpha', 1e-6, 100.0, log=True)
-    #         l1_ratio = trial.suggest_float('l1_ratio', 0.0, 1.0)
-
-    #         # Create an ElasticNet model
-    #         model = ElasticNet(alpha = alpha, 
-    #                            l1_ratio = l1_ratio, 
-    #                            max_iter = 10000,
-    #                            random_state = self.seed)
-
-    #         # Perform cross-validation
-    #         warnings.simplefilter('ignore', sklearn.exceptions.ConvergenceWarning)
-    #         score = cross_val_score(model, X, y, cv=self.dataset.preprocessor.n_folds, scoring=meta_scorer, n_jobs=-1)
-
-    #         # Return the mean score
-    #         return score.mean()
-
-    #     # Create a study object and optimize the objective function
-    #     self.meta_study = optuna.create_study(
-    #         direction='maximize',
-    #         sampler=optuna.samplers.TPESampler(multivariate=True),
-    #         pruner=optuna.pruners.MedianPruner()
-    #     )
-    #     self.meta_study.optimize(objective, timeout = self.meta_timeout)
-
-    #     # Get the best parameters
-    #     best_params = self.meta_study.best_params
-
-    #     # Train the final model with the best parameters
-    #     final_model = ElasticNet(alpha=best_params['alpha'], l1_ratio=best_params['l1_ratio'], random_state=self.seed)
-    #     final_model.fit(X, y)
-
-    #     print("Done:")
-    #     print(f"Number of models tried by Optuna: {len(self.meta_study.trials)}.")
-    #     print("Best ElasticNet parameters:", best_params)
-    #     print(f"Best {self.eval_metric.name} score:", self.meta_study.best_value)
-
-    #     self.meta_learner = final_model
-
-
-
     def _train_meta_learner(self):
+
         """
-        Creates and trains an ElasticNetCV meta-learner using out-of-fold probabilities from various GBMs models.
-        Then refits the best ElasticNet model (without cross-validation) on the full dataset.
+        Creates and trains an ElasticNet meta-learner using out-of-fold probabilities from various GBMs models.
+        Uses Optuna for hyperparameter optimization.
         """
         
         # Initialize list to collect predictions and ground truth labels
@@ -593,47 +556,127 @@ class Trainer:
         X = np.hstack(all_preds)  # Shape (n_samples, n_models * n_predicted_values)
         y = ground_truth  # Shape (n_samples,)
 
-        # Train ElasticNetCV with cross-validation to find the best parameters
-        elasticnet_cv = ElasticNetCV(
-            l1_ratio=np.linspace(1e-5, 1.0, 500),
-            n_alphas=1000,  # Number of alphas to try
-            cv=self.dataset.preprocessor.n_folds,  # Cross-validation folds
-            max_iter=10000,
-            random_state=self.seed,
-            n_jobs=-1  # Parallelization
-        )
-        
-        # Fit the ElasticNetCV model
-        elasticnet_cv.fit(X, y)
-
-        
-        # Refit ElasticNet model using the best-found parameters, but without CV
-        final_model = ElasticNet(
-            alpha=elasticnet_cv.alpha_,
-            l1_ratio=elasticnet_cv.l1_ratio_,
-            max_iter=10000,
-            random_state=self.seed
-        )
-
         # Scorer
         meta_scorer = make_scorer(self.eval_metric.score, 
-                                  greater_is_better=self.eval_metric.greater_is_better)
+                                greater_is_better=self.eval_metric.greater_is_better)
 
-        # Calculate mean cross-validated score using a desired scoring metric
-        mean_cv_score = cross_val_score(final_model, X, y, cv=self.dataset.preprocessor.n_folds, scoring=meta_scorer, n_jobs=-1).mean()
+        def objective(trial):
+            # Define the hyperparameters to optimize
+            alpha = trial.suggest_float('alpha', 1e-6, 100.0, log=True)
+            l1_ratio = trial.suggest_float('l1_ratio', 0.0, 1.0)
+            max_iter = trial.suggest_int('max_iter', 1000, 20000, log=True)
 
-        # Print cross-validated results
-        print("Done:")
-        print(f"Best alpha: {elasticnet_cv.alpha_}")
-        print(f"Best l1_ratio: {elasticnet_cv.l1_ratio_}")
-        print(f"Mean cross-validation {self.eval_metric.name} score:", mean_cv_score)
+            # Create an ElasticNet model
+            model = ElasticNet(alpha=alpha, 
+                            l1_ratio=l1_ratio, 
+                            max_iter=max_iter,
+                            random_state=self.seed)
 
-        
-        # Refit on the entire dataset without cross-validation
+            # Perform cross-validation
+            warnings.simplefilter('ignore', sklearn.exceptions.ConvergenceWarning)
+            score = cross_val_score(model, X, y, cv=self.dataset.preprocessor.n_folds, scoring=meta_scorer, n_jobs=-1)
+
+            # Return the mean score
+            return score.mean()
+
+        # Create a study object and optimize the objective function
+        self.meta_study = optuna.create_study(
+            direction='maximize',
+            sampler=optuna.samplers.TPESampler(multivariate=True),
+            pruner=optuna.pruners.MedianPruner()
+        )
+        self.meta_study.optimize(objective, timeout=self.meta_timeout)
+
+        # Get the best parameters
+        best_params = self.meta_study.best_params
+
+        # Train the final model with the best parameters
+        final_model = ElasticNet(alpha=best_params['alpha'], 
+                                l1_ratio=best_params['l1_ratio'], 
+                                max_iter=best_params['max_iter'], 
+                                random_state=self.seed)
         final_model.fit(X, y)
 
-        # Store the final trained model
+        print("Done:")
+        print(f"Number of models tried by Optuna: {len(self.meta_study.trials)}.")
+        print("Best ElasticNet parameters:", best_params)
+        print(f"Best {self.eval_metric.name} score:", self.meta_study.best_value)
+
         self.meta_learner = final_model
+
+
+
+
+
+    # def _train_meta_learner(self):
+    #     """
+    #     Creates and trains an ElasticNetCV meta-learner using out-of-fold probabilities from various GBMs models.
+    #     Then refits the best ElasticNet model (without cross-validation) on the full dataset.
+    #     """
+        
+    #     # Initialize list to collect predictions and ground truth labels
+    #     all_preds = []
+    #     ground_truth = None
+
+    #     # Extract predictions and ground truth from the meta_dict dictionary
+    #     for model_key, data in self.meta_dict.items():
+    #         preds = data["oof_preds"]["predictions"]
+    #         labels = data["oof_preds"]["ground_truths"]
+
+    #         # Set ground truth labels from the first model (since they are the same across models)
+    #         if ground_truth is None:
+    #             ground_truth = labels
+            
+    #         all_preds.append(preds)
+
+    #     # Ensure all predictions are 2D arrays (n_samples, 1) before stacking
+    #     all_preds = [preds.reshape(-1, 1) if preds.ndim == 1 else preds for preds in all_preds]
+        
+    #     # Convert lists to numpy arrays
+    #     X = np.hstack(all_preds)  # Shape (n_samples, n_models * n_predicted_values)
+    #     y = ground_truth  # Shape (n_samples,)
+
+    #     # Train ElasticNetCV with cross-validation to find the best parameters
+    #     elasticnet_cv = ElasticNetCV(
+    #         l1_ratio=np.linspace(1e-5, 1.0, 500),
+    #         n_alphas=1000,  # Number of alphas to try
+    #         cv=self.dataset.preprocessor.n_folds,  # Cross-validation folds
+    #         max_iter=10000,
+    #         random_state=self.seed,
+    #         # n_jobs=-1  # Parallelization
+    #     )
+        
+    #     # Fit the ElasticNetCV model
+    #     elasticnet_cv.fit(X, y)
+
+        
+    #     # Refit ElasticNet model using the best-found parameters, but without CV
+    #     final_model = ElasticNet(
+    #         alpha=elasticnet_cv.alpha_,
+    #         l1_ratio=elasticnet_cv.l1_ratio_,
+    #         max_iter=10000,
+    #         random_state=self.seed
+    #     )
+
+    #     # Scorer
+    #     meta_scorer = make_scorer(self.eval_metric.score, 
+    #                               greater_is_better=self.eval_metric.greater_is_better)
+
+    #     # Calculate mean cross-validated score using a desired scoring metric
+    #     mean_cv_score = cross_val_score(final_model, X, y, cv=self.dataset.preprocessor.n_folds, scoring=meta_scorer, n_jobs=-1).mean()
+
+    #     # Print cross-validated results
+    #     print("Done:")
+    #     print(f"Best alpha: {elasticnet_cv.alpha_}")
+    #     print(f"Best l1_ratio: {elasticnet_cv.l1_ratio_}")
+    #     print(f"Mean cross-validation {self.eval_metric.name} score:", mean_cv_score)
+
+        
+    #     # Refit on the entire dataset without cross-validation
+    #     final_model.fit(X, y)
+
+    #     # Store the final trained model
+    #     self.meta_learner = final_model
 
 
 
@@ -681,7 +724,7 @@ class Trainer:
         self.X_train_full, self.y_train_full = self.dataset.preprocessor.transform(self.dataset.df, fit=True)
     
         
-        self.all_lbs = [self.xgb_lb, self.lgb_lb, self.cat_lb]
+        self.all_lbs = [self.xgb_lb, self.lgb_lb, self.cat_lb, self.rf_lb, self.sgd_lin_lb]
         
         for leaderboard in self.all_lbs:
             if leaderboard is not None:
@@ -690,7 +733,7 @@ class Trainer:
                 for idx, row in df.iterrows():
                     # Retrain the model
                     retrained_model = row['model'].fit(self.X_train_full, 
-                                                    self.y_train_full)
+                                                       self.y_train_full)
                     
                     # Update the model in the leaderboard
                     df.at[idx, 'model'] = retrained_model
@@ -744,7 +787,7 @@ class Trainer:
         cols = ["id"] + self.user_attrs + ["model"]
 
         # Collect the model DataFrames that are not None
-        leaderboards = [x for x in [self.lgb_lb, self.cat_lb, self.xgb_lb] if x is not None]
+        leaderboards = [x for x in [self.lgb_lb, self.cat_lb, self.xgb_lb, self.rf_lb, self.sgd_lin_lb] if x is not None]
 
         # Apply slicing and column selection
         leaderboards = [df.loc[:self.select_top-1, cols] for df in leaderboards]
@@ -925,8 +968,8 @@ class Trainer:
         metrics_df = eval_df["model"].apply(lambda model: pd.Series(self.compute_metrics(model, X, y)))
 
         return pd.concat([eval_df, metrics_df], axis=1).sort_values(by = "custom_" + self.eval_metric.name,
-                                                                    ascending = not(self.eval_metric.greater_is_better),
-                                                                    ignore_index = True)
+                                                                         ascending = not(self.eval_metric.greater_is_better),
+                                                                         ignore_index = True)
     
     
 
