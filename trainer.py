@@ -82,7 +82,6 @@ class Trainer:
                  timeout = 3000,
                  seed = 42,
                  select_top = 3,
-                 select_top = 3,
                  train_meta = True,
                  meta_timeout = 600,
                  save_path = "saved_trainer.pkl"):
@@ -99,7 +98,6 @@ class Trainer:
                 Used in CV hyperparam-tuning (with early stopping) and for refitting models at end on
                 the entire data.
 
-                eval_dataset (TabularDataset): A TabularDataset used exclusively for evaluation
                 eval_dataset (TabularDataset): A TabularDataset used exclusively for evaluation
                 purposes: generating final leaderboard (including Ensemble model(s)).
 
@@ -411,7 +409,7 @@ class Trainer:
             if self.pb_type == "regression":
                 sgd_lin_model = SGDRegressor()
             else:
-                self.hyperparams["SGD_LINEAR"]["loss"] = (["hinge", "log_loss", "modified_huber", "squared_hinge", "perceptron"], "cat")
+                self.hyperparams["SGD_LINEAR"]["loss"] = (["log_loss", "modified_huber"], "cat")
                 sgd_lin_model = SGDClassifier()
 
             # Find best hyperparams with Optuna and display top models
@@ -513,6 +511,7 @@ class Trainer:
                 
                 # Predict on validation data
                 if self.dataset.preprocessor.prob_type != "regression":
+                    # pred_method = (model.predict_proba if hasattr(model, "predict_proba") else model.predict)
                     oof_preds = model.predict_proba(fold["val"][0]).squeeze()
                 else:
                     oof_preds = model.predict(fold["val"][0]).squeeze()
@@ -537,9 +536,8 @@ class Trainer:
         """
         Creates and trains an ElasticNet meta-learner using out-of-fold probabilities from various GBMs models.
         Uses Optuna for hyperparameter optimization.
-        Creates and trains an ElasticNet meta-learner using out-of-fold probabilities from various GBMs models.
-        Uses Optuna for hyperparameter optimization.
         """
+
         
         # Initialize list to collect predictions and ground truth labels
         all_preds = []
@@ -565,48 +563,7 @@ class Trainer:
 
         # Scorer
         meta_scorer = make_scorer(self.eval_metric.score, 
-                                greater_is_better=self.eval_metric.greater_is_better)
-
-        def objective(trial):
-            # Define the hyperparameters to optimize
-            alpha = trial.suggest_float('alpha', 1e-6, 100.0, log=True)
-            l1_ratio = trial.suggest_float('l1_ratio', 0.0, 1.0)
-            max_iter = trial.suggest_int('max_iter', 1000, 20000, log=True)
-
-            # Create an ElasticNet model
-            model = ElasticNet(alpha=alpha, 
-                            l1_ratio=l1_ratio, 
-                            max_iter=max_iter,
-                            random_state=self.seed)
-
-            # Perform cross-validation
-            warnings.simplefilter('ignore', sklearn.exceptions.ConvergenceWarning)
-            score = cross_val_score(model, X, y, cv=self.dataset.preprocessor.n_folds, scoring=meta_scorer, n_jobs=-1)
-
-            # Return the mean score
-            return score.mean()
-
-        # Create a study object and optimize the objective function
-        self.meta_study = optuna.create_study(
-            direction='maximize',
-            sampler=optuna.samplers.TPESampler(multivariate=True),
-            pruner=optuna.pruners.MedianPruner()
-        )
-        self.meta_study.optimize(objective, timeout=self.meta_timeout)
-
-        # Get the best parameters
-        best_params = self.meta_study.best_params
-
-        # Train the final model with the best parameters
-        final_model = ElasticNet(alpha=best_params['alpha'], 
-                                l1_ratio=best_params['l1_ratio'], 
-                                max_iter=best_params['max_iter'], 
-                                random_state=self.seed)
-        final_model.fit(X, y)
-
-        # Scorer
-        meta_scorer = make_scorer(self.eval_metric.score, 
-                                greater_is_better=self.eval_metric.greater_is_better)
+                                  greater_is_better=self.eval_metric.greater_is_better)
 
         def objective(trial):
             # Define the hyperparameters to optimize
@@ -657,78 +614,7 @@ class Trainer:
 
 
     # def _train_meta_learner(self):
-    #     """
-    #     Creates and trains an ElasticNetCV meta-learner using out-of-fold probabilities from various GBMs models.
-    #     Then refits the best ElasticNet model (without cross-validation) on the full dataset.
-    #     """
-        
-    #     # Initialize list to collect predictions and ground truth labels
-    #     all_preds = []
-    #     ground_truth = None
-
-    #     # Extract predictions and ground truth from the meta_dict dictionary
-    #     for model_key, data in self.meta_dict.items():
-    #         preds = data["oof_preds"]["predictions"]
-    #         labels = data["oof_preds"]["ground_truths"]
-
-    #         # Set ground truth labels from the first model (since they are the same across models)
-    #         if ground_truth is None:
-    #             ground_truth = labels
-            
-    #         all_preds.append(preds)
-
-    #     # Ensure all predictions are 2D arrays (n_samples, 1) before stacking
-    #     all_preds = [preds.reshape(-1, 1) if preds.ndim == 1 else preds for preds in all_preds]
-        
-    #     # Convert lists to numpy arrays
-    #     X = np.hstack(all_preds)  # Shape (n_samples, n_models * n_predicted_values)
-    #     y = ground_truth  # Shape (n_samples,)
-
-    #     # Train ElasticNetCV with cross-validation to find the best parameters
-    #     elasticnet_cv = ElasticNetCV(
-    #         l1_ratio=np.linspace(1e-5, 1.0, 500),
-    #         n_alphas=1000,  # Number of alphas to try
-    #         cv=self.dataset.preprocessor.n_folds,  # Cross-validation folds
-    #         max_iter=10000,
-    #         random_state=self.seed,
-    #         # n_jobs=-1  # Parallelization
-    #     )
-        
-    #     # Fit the ElasticNetCV model
-    #     elasticnet_cv.fit(X, y)
-
-        
-    #     # Refit ElasticNet model using the best-found parameters, but without CV
-    #     final_model = ElasticNet(
-    #         alpha=elasticnet_cv.alpha_,
-    #         l1_ratio=elasticnet_cv.l1_ratio_,
-    #         max_iter=10000,
-    #         random_state=self.seed
-    #     )
-
-    #     # Scorer
-    #     meta_scorer = make_scorer(self.eval_metric.score, 
-    #                               greater_is_better=self.eval_metric.greater_is_better)
-
-    #     # Calculate mean cross-validated score using a desired scoring metric
-    #     mean_cv_score = cross_val_score(final_model, X, y, cv=self.dataset.preprocessor.n_folds, scoring=meta_scorer, n_jobs=-1).mean()
-
-    #     # Print cross-validated results
-    #     print("Done:")
-    #     print(f"Best alpha: {elasticnet_cv.alpha_}")
-    #     print(f"Best l1_ratio: {elasticnet_cv.l1_ratio_}")
-    #     print(f"Mean cross-validation {self.eval_metric.name} score:", mean_cv_score)
-        print(f"Number of models tried by Optuna: {len(self.meta_study.trials)}.")
-        print("Best ElasticNet parameters:", best_params)
-        print(f"Best {self.eval_metric.name} score:", self.meta_study.best_value)
-
-        self.meta_learner = final_model
-
-
-
-
-
-    # def _train_meta_learner(self):
+    # 
     #     """
     #     Creates and trains an ElasticNetCV meta-learner using out-of-fold probabilities from various GBMs models.
     #     Then refits the best ElasticNet model (without cross-validation) on the full dataset.
@@ -794,11 +680,7 @@ class Trainer:
         
     #     # Refit on the entire dataset without cross-validation
     #     final_model.fit(X, y)
-    #     # Refit on the entire dataset without cross-validation
-    #     final_model.fit(X, y)
 
-    #     # Store the final trained model
-    #     self.meta_learner = final_model
     #     # Store the final trained model
     #     self.meta_learner = final_model
 
@@ -821,6 +703,7 @@ class Trainer:
         for model_id in self.meta_dict.keys():
             model = self.meta_dict[model_id]["model"]
             if self.dataset.preprocessor.prob_type != "regression":
+                # pred_method = (model.predict_proba if hasattr(model, "predict_proba") else model.predict)
                 preds = model.predict_proba(X)
             else:
                 preds = model.predict(X).reshape(-1, 1)
@@ -1092,8 +975,6 @@ class Trainer:
         metrics_df = eval_df["model"].apply(lambda model: pd.Series(self.compute_metrics(model, X, y)))
 
         return pd.concat([eval_df, metrics_df], axis=1).sort_values(by = "custom_" + self.eval_metric.name,
-                                                                         ascending = not(self.eval_metric.greater_is_better),
-                                                                         ignore_index = True)
                                                                          ascending = not(self.eval_metric.greater_is_better),
                                                                          ignore_index = True)
     

@@ -65,7 +65,6 @@ class Optunization:
         Parameters:
 
             model (object): A ML Model. Can be: LightGBM, CatBoost, XGBoost, RandomForest or other.
-            model (object): A ML Model. Can be: LightGBM, CatBoost, XGBoost, RandomForest or other.
             
             model_hyperparams (dict): The model's hyperparams search space dictionary to be used by Optuna.
                                       Key format: hyperparam name, as expected by the model's constructor.
@@ -393,7 +392,6 @@ class Optunization:
 
                     train_metric = self.eval_metric.score(y_true = self.data[0]["train"][1],
                                                           y_pred = self.model.predict(self.data[0]["train"][0]).squeeze())
-                                                          y_pred = self.model.predict(self.data[0]["train"][0]).squeeze())
                     
                     val_metric = self.eval_metric.score(y_true = self.data[0]["val"][1], 
                                                         y_pred = self.model.predict(self.data[0]["val"][0]).squeeze())
@@ -423,19 +421,17 @@ class Optunization:
                 if self.mode == "train":
 
                     # Train
-                    # Train
 
                     if self.abrv in ["RF", "SGD_LINEAR"]:
-                        self.model.fit(self.data[0]["train"][0], self.data[0]["train"])
+                        self.model.fit(self.data[0]["train"][0], self.data[0]["train"][1])
                     else:
-                        self.model.fit(self.data[0]["train"][0], self.data[0]["train"],
+                        self.model.fit(self.data[0]["train"][0], self.data[0]["train"][1],
                                        eval_set = [tuple(self.data[0]["train"])],
                                        **self.fit_kwargs)
 
                     # Compute train metric
 
                     train_metric = self.eval_metric.score(y_true = self.data[0]["train"][1], 
-                                                          y_pred = self.model.predict(self.data[0]["train"][0]).squeeze())
                                                           y_pred = self.model.predict(self.data[0]["train"][0]).squeeze())
                     
                     # Use train metric for optimization
@@ -515,7 +511,6 @@ class Optunization:
 
         """
 
-        Retrieves model constructor hyperparams from Optuna trials.
         Retrieves model constructor hyperparams from Optuna trials.
 
         Returns a list of dictionaries.
