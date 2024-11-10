@@ -858,7 +858,6 @@ class Trainer:
                     # Retrain the model
                     retrained_model = row['model'].fit(self.X_train_full, 
                                                        self.y_train_full)
-                                                       self.y_train_full)
                     
                     # Update the model in the leaderboard
                     df.at[idx, 'model'] = retrained_model
