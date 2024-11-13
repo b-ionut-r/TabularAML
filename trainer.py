@@ -579,7 +579,9 @@ class Trainer:
 
             # Perform cross-validation
             warnings.simplefilter('ignore', sklearn.exceptions.ConvergenceWarning)
-            score = cross_val_score(model, X, y, cv=self.dataset.preprocessor.n_folds, scoring=meta_scorer, n_jobs=-1)
+            score = cross_val_score(model, X, y, cv=self.dataset.preprocessor.n_folds, scoring=meta_scorer, 
+                                    # n_jobs=-1
+                                    )
 
             # Return the mean score
             return score.mean()
