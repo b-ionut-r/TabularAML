@@ -173,7 +173,7 @@ class PreprocessingTool:
                  imputer = CustomImputer(),
                  feature_gen_class = None,
                  val_split = False, val_ratio = 0.2, 
-                 val_folds = True, n_folds = 5, 
+                 val_folds = True, n_folds = 4, 
                  forecasting = False, window_size = 30,
                  encoder = OneHotEncoder(sparse_output = False,
                                          handle_unknown = "ignore"),
