@@ -1,6 +1,7 @@
 from typing import Optional, Dict, Union, List
 import numpy as np
 import pandas as pd
+from sklearn.metrics import root_mean_squared_error, mean_absolute_error, mean_squared_error, r2_score
 
 class CatScorer:
 
@@ -169,3 +170,34 @@ class Scorer:
             score = self.score(y_true, y_pred)
 
             return self.name, score
+
+
+# Predefined scorers
+
+rmse = Scorer(name = "rmse",
+              scorer = root_mean_squared_error,
+              greater_is_better = False,
+              extra_params = {})
+
+mae = Scorer(name = "mae",
+             scorer = mean_absolute_error,
+             greater_is_better = False,
+             extra_params = {})
+
+mse = Scorer(name = "mse",
+             scorer = mean_squared_error,
+             greater_is_better = False,
+             extra_params = {})
+
+r2 = Scorer(name = "r2",
+            scorer = r2_score,
+            greater_is_better = True,
+            extra_params = {})
+
+
+predefined_scorers = {
+    "rmse": rmse,
+    "mae": mae,
+    "mse": mse,
+    "r2": r2
+}

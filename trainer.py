@@ -2,7 +2,7 @@
 
 from preprocessing import PreprocessingTool
 from dataset import TabularDataset
-from scorer import Scorer
+from scorer import Scorer, predefined_scorers
 from optimizer import Optunization
 from hyperparams_configs import DEFAULT_CONFIG
 
@@ -101,11 +101,18 @@ class Trainer:
                 eval_dataset (TabularDataset): A TabularDataset used exclusively for evaluation
                 purposes: generating final leaderboard (including Ensemble model(s)).
 
-                eval_metric (Scorer): A Scorer instance with the eval metric chosen to be used 
-                                      during training for optimization (early stopping) and for evaluation logging and
-                                      ranking purposes.
+                eval_metric (Scorer | str): A Scorer instance with the eval metric chosen to be used 
+                                            during training for optimization (early stopping) and for evaluation, logging and
+                                            ranking purposes.
+                                            Can be an abbreviation of a common loss / score, such as "rmse", "rmsle",
+                                            "mae", "mse", "r2". 
+                                            If no eval_metric is provided, "rmse" will be used by default.  
+
 
                 early_stopping_rounds (int): Stops training after specified rounds without validation improvement. 
+                                             Used for faster training, allowing a deeper exploration of the search space,
+                                             possibly at the expense of full reproducibility of validation performance
+                                             on the test set.
                                              WARNING: Using this parameter, especially with low non-zero values,
                                                       may cause underfitting and poor reproducibility.
                                                       Consider using `of_mitigation_level` instead for more stable performance.
@@ -226,6 +233,12 @@ class Trainer:
         # Process TabularDataset using PreprocessingTool
         self.processed_data = self.dataset.process()
         self.pb_type = self.dataset.preprocessor.prob_type
+
+        # Eval Metric
+        if self.eval_metric in predefined_scorers.keys():
+            self.eval_metric = predefined_scorers[self.eval_metric]
+        if self.eval_metric is None and self.pb_type == "regression":
+            self.eval_metric = predefined_scorers["rmse"]
 
 
         print(f"\n\n\nSTARTING TRAINING ... \n\n")
