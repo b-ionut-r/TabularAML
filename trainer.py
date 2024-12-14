@@ -11,7 +11,7 @@ import pandas as pd
 import sklearn
 from sklearn.utils import Bunch
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, root_mean_squared_error
 from sklearn.linear_model import ElasticNet, ElasticNetCV, LogisticRegression, Ridge
 from sklearn.model_selection import cross_val_score
 from sklearn.metrics import make_scorer
@@ -84,7 +84,7 @@ class Trainer:
                  select_top = 3,
                  train_meta = True,
                  meta_timeout = 600,
-                 save_path = "saved_trainer.pkl"):
+                 save_path = None):
         
         
         """
@@ -170,7 +170,7 @@ class Trainer:
                                     Default is 600s or 10 mins.
 
                 save_path (str): Path to save the trainer instance to. File extension needs to be .pkl.
-                                 Default is "saved_trainer.pkl".
+                                 If not set, no saving will occur.
                 
 
 
@@ -491,7 +491,8 @@ class Trainer:
         # Retraining best found models on whole available data, saving trainer
         print("Retraining best found models on whole available data...")
         self._train_best_on_whole_data()
-        self.dump(self.save_path)
+        if self.save_path is not None:
+            self.dump(self.save_path)
         print(f"Done. Trainer is ready for inference and saved at path: {self.save_path}")
         print(384 * "-", "\n\n")
 
@@ -911,7 +912,7 @@ class Trainer:
             
             mae = mean_absolute_error(y, preds)
             mse = mean_squared_error(y, preds)
-            rmse = np.sqrt(mse)
+            rmse = root_mean_squared_error(y, preds)
             r2 = r2_score(y, preds)
             custom_metric = self.eval_metric.score(y, preds)
 

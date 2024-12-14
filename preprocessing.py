@@ -175,6 +175,7 @@ class PreprocessingTool:
                  val_split = False, val_ratio = 0.2, 
                  val_folds = True, n_folds = 4, 
                  forecasting = False, window_size = 30,
+                 drop_non_categorical_text = True,
                  encoder = OneHotEncoder(sparse_output = False,
                                          handle_unknown = "ignore"),
                  scaler: Optional[StandardScaler] = MinMaxScaler(),
@@ -218,8 +219,10 @@ class PreprocessingTool:
             window_size (int): The number of time steps to forecast, applicable only if forecasting is True.
                                 Default is 30.
 
-            onehot_encoder (object): An encoder object for categorical columns, requiring a .fit_transform() method.
-                                     Defaults to sklearn.preprocessing.OneHotEncoder().
+            drop_non_categorical_text: Flag to drop non-categorical text features. Default is True.
+
+            encoder (object): An encoder object for categorical columns, requiring a .fit_transform() method.
+                              Defaults to sklearn.preprocessing.OneHotEncoder().
 
             scaler (object): An optional scaler object for numerical columns, requiring a .fit_transform() method.
                              Defaults to sklearn.preprocessing.MinMaxScaler().
@@ -245,6 +248,7 @@ class PreprocessingTool:
         self.forecasting  = forecasting
         self.window_size = window_size
 
+        self.drop_non_categorical_text = drop_non_categorical_text
         self.encoder = encoder
         self.label_encoder = None
         self.scaler = scaler
@@ -292,9 +296,9 @@ class PreprocessingTool:
 
     def _get_dtypes(self, df: pd.DataFrame) -> tuple[pd.DataFrame, list]:
         """
-        Internal method. Used to infer features datatypes and make certain conversion(s)
+        Internal method. Used to infer features' datatypes and make certain conversion(s)
         (like numbers/percentages from string to float). 
-        Drops ID column(s) and non-categorical text features.
+        Drops ID column(s) and non-categorical text features based on the self.drop_non_categorical_text flag.
 
         Parameters:
             df (pd.DataFrame): Input pandas DataFrame.
@@ -308,7 +312,8 @@ class PreprocessingTool:
         dropped_columns = []
 
         print("DTYPES DETECTOR:\n")
-        print("WARNING: current TabularAML implementation doesn't handle non-categorical text features.\n")
+        if self.drop_non_categorical_text:
+            print("WARNING: current TabularAML implementation doesn't handle non-categorical text features.\n")
         print(f"Found {len(df.dtypes.unique())} unique raw np.dtype(s): {df.dtypes.unique()}.")
 
         # Conversions and data types storing
@@ -340,8 +345,11 @@ class PreprocessingTool:
                     if conversion_successful:
                         df_dtypes_list.append("float" if df[col].dtype == np.float64 else "int")
                     else:
-                        # If it's a non-categorical text feature, drop it
-                        dropped_columns.append(col)
+                        # If it's a non-categorical text feature, flag it for dropping if required
+                        if self.drop_non_categorical_text:
+                            dropped_columns.append(col)
+                        else:
+                            df_dtypes_list.append("cat")
 
             elif np.issubdtype(df[col].dtype, np.integer):
                 df_dtypes_list.append("int")
@@ -349,7 +357,8 @@ class PreprocessingTool:
             elif np.issubdtype(df[col].dtype, np.floating):
                 df_dtypes_list.append("float")
 
-        # Drop ID columns and non-categorical text columns
+
+        # Drop ID columns and non-categorical text columns if required
         for col in df.columns:
             # Drop columns with names like "id" or previously flagged non-categorical text
             if col.lower() == "id" or col in dropped_columns:
@@ -357,6 +366,7 @@ class PreprocessingTool:
         
         if df.index.name is not None:
             dropped_columns.append(df.index.name)
+
 
         # Remove dropped columns from df_dtypes_list
         df_dtypes_list = [dtype for i, dtype in enumerate(df_dtypes_list) if df.columns[i] not in dropped_columns]
@@ -374,6 +384,7 @@ class PreprocessingTool:
         print("-----------------------------------------------------------------------------------------------------------------------------------------")
 
         return df, df_dtypes_list
+
 
 
 
@@ -581,35 +592,122 @@ class PreprocessingTool:
         return processed_data
                 
     
+    # def _encode(self, 
+    #             df_train: pd.DataFrame, 
+    #             df_val: Optional[pd.DataFrame] = None,
+    #             fit = True) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
+        
+    #     """
+        
+    #     Internal method to encode categorical features using the provided encoder instance.
+    #     Default is OneHotEncoder().
 
-    
+    #     Parameters:
+
+    #         df_train (pd.DataFrame): Train pandas DataFrame to .fit_transform() if fit = True.
+
+    #         df_val (pd.DataFrame): Optional. Validation DataFrame to .transform().
+
+    #         fit (bool): Whether to fit. Use True for train data, False for inference.
+    #                     Default is True.
+
+    #     Returns:
+    #         pd.DataFrame: Inplace transformed training DataFrame.
+
+    #         Optional[pd.DataFrame]: Transformed validation DataFrame, if df_val is provided.
+
+    #     """
+
+    #     # Select categorical columns
+    #     categorical_columns = df_train.select_dtypes(include=["object", "category"]).columns
+    #     self.cat_columns = categorical_columns
+
+    #     # Get indices of categorical columns
+    #     cat_idx = [df_train.columns.get_loc(col) for col in categorical_columns]
+
+    #     # Check if there are categorical columns to encode
+    #     if len(categorical_columns) > 0:
+    #         # Transform training data
+    #         if fit:
+    #             new_train_cols = self.encoder.fit_transform(df_train.iloc[:, cat_idx]) # for training
+    #         else:
+    #             new_train_cols = self.encoder.transform(df_train.iloc[:, cat_idx]) # for inference
+
+    #         new_train_cols = pd.DataFrame(new_train_cols, columns=self.encoder.get_feature_names_out(df_train.columns[cat_idx]), index=df_train.index)
+
+    #         df_train = df_train.drop(columns=df_train.columns[cat_idx])
+    #         df_train = pd.concat([df_train, new_train_cols], axis=1)
+
+    #         # Clean the column names (for XGB)
+    #         df_train.columns = [col.replace('[', '').replace(']', '').replace('<', '').replace('>', '').replace(' ', '_') for col in df_train.columns]
+
+    #         if df_val is not None:
+    #             # Transform validation data if it exists and has categorical columns
+    #             new_val_cols = self.encoder.transform(df_val.iloc[:, cat_idx])
+    #             new_val_cols = pd.DataFrame(new_val_cols, columns=self.encoder.get_feature_names_out(df_val.columns[cat_idx]), index=df_val.index)
+
+    #             df_val = df_val.drop(columns=df_val.columns[cat_idx])
+    #             df_val = pd.concat([df_val, new_val_cols], axis=1)
+
+    #             # Clean the column names (for XGB)
+    #             df_val.columns = [col.replace('[', '').replace(']', '').replace('<', '').replace('>', '').replace(' ', '_') for col in df_val.columns]
+
+    #             return df_train, df_val
+    #         else:
+    #             return df_train
+    #     else:
+    #         # Handle case where there are no categorical columns to encode
+    #         if df_val is not None:
+    #             return df_train, df_val
+    #         else:
+    #             return df_train
+
+
+    def _clean_column_name(self, col: str, existing_columns: set) -> str:
+        """
+        Cleans a column name to avoid issues with XGBoost and LightGBM while preserving uniqueness.
+        Replaces problematic characters with underscores and ensures no name collisions.
+        
+        Parameters:
+            col (str): Original column name.
+            existing_columns (set): A set of already cleaned column names for conflict resolution.
+
+        Returns:
+            str: Cleaned and unique column name.
+        """
+        # Replace problematic characters with underscores
+        cleaned_col = re.sub(r'[^\w]', '_', col)
+        
+        # Ensure uniqueness by appending a suffix if the name already exists
+        original_cleaned_col = cleaned_col
+        counter = 1
+        while cleaned_col in existing_columns:
+            cleaned_col = f"{original_cleaned_col}_{counter}"
+            counter += 1
+
+        # Add the cleaned column to the set of existing columns
+        existing_columns.add(cleaned_col)
+        return cleaned_col
 
     def _encode(self, 
                 df_train: pd.DataFrame, 
                 df_val: Optional[pd.DataFrame] = None,
-                fit = True) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
-        
+                fit=True) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
         """
-        
         Internal method to encode categorical features using the provided encoder instance.
-        Default is OneHotEncoder().
+        Default is OneHotEncoder(). It cleans column names to avoid issues with XGBoost and LightGBM.
 
         Parameters:
-
             df_train (pd.DataFrame): Train pandas DataFrame to .fit_transform() if fit = True.
-
             df_val (pd.DataFrame): Optional. Validation DataFrame to .transform().
-
             fit (bool): Whether to fit. Use True for train data, False for inference.
                         Default is True.
 
         Returns:
             pd.DataFrame: Inplace transformed training DataFrame.
-
             Optional[pd.DataFrame]: Transformed validation DataFrame, if df_val is provided.
-
         """
-
+        
         # Select categorical columns
         categorical_columns = df_train.select_dtypes(include=["object", "category"]).columns
         self.cat_columns = categorical_columns
@@ -617,32 +715,40 @@ class PreprocessingTool:
         # Get indices of categorical columns
         cat_idx = [df_train.columns.get_loc(col) for col in categorical_columns]
 
+        # Initialize set to track existing column names
+        existing_columns = set()
+
         # Check if there are categorical columns to encode
         if len(categorical_columns) > 0:
             # Transform training data
             if fit:
-                new_train_cols = self.encoder.fit_transform(df_train.iloc[:, cat_idx]) # for training
+                new_train_cols = self.encoder.fit_transform(df_train.iloc[:, cat_idx])  # for training
             else:
-                new_train_cols = self.encoder.transform(df_train.iloc[:, cat_idx]) # for inference
+                new_train_cols = self.encoder.transform(df_train.iloc[:, cat_idx])  # for inference
 
-            new_train_cols = pd.DataFrame(new_train_cols, columns=self.encoder.get_feature_names_out(df_train.columns[cat_idx]), index=df_train.index)
+            new_train_cols = pd.DataFrame(new_train_cols, 
+                                          columns=self.encoder.get_feature_names_out(df_train.columns[cat_idx]), 
+                                          index=df_train.index)
 
             df_train = df_train.drop(columns=df_train.columns[cat_idx])
             df_train = pd.concat([df_train, new_train_cols], axis=1)
 
-            # Clean the column names (for XGB)
-            df_train.columns = [col.replace('[', '').replace(']', '').replace('<', '').replace('>', '').replace(' ', '_') for col in df_train.columns]
+            # Clean the column names for both XGBoost and LightGBM
+            df_train.columns = [self._clean_column_name(col, existing_columns) for col in df_train.columns]
 
             if df_val is not None:
                 # Transform validation data if it exists and has categorical columns
                 new_val_cols = self.encoder.transform(df_val.iloc[:, cat_idx])
-                new_val_cols = pd.DataFrame(new_val_cols, columns=self.encoder.get_feature_names_out(df_val.columns[cat_idx]), index=df_val.index)
+                new_val_cols = pd.DataFrame(new_val_cols, 
+                                            columns=self.encoder.get_feature_names_out(df_val.columns[cat_idx]), 
+                                            index=df_val.index)
 
                 df_val = df_val.drop(columns=df_val.columns[cat_idx])
                 df_val = pd.concat([df_val, new_val_cols], axis=1)
 
-                # Clean the column names (for XGB)
-                df_val.columns = [col.replace('[', '').replace(']', '').replace('<', '').replace('>', '').replace(' ', '_') for col in df_val.columns]
+                # Clean the column names for the validation set
+                existing_columns = set()  # Reset for validation data
+                df_val.columns = [self._clean_column_name(col, existing_columns) for col in df_val.columns]
 
                 return df_train, df_val
             else:
@@ -653,7 +759,7 @@ class PreprocessingTool:
                 return df_train, df_val
             else:
                 return df_train
-
+    
 
     
 
@@ -879,8 +985,7 @@ class PreprocessingTool:
         # No logging 
         with open(os.devnull, "w") as devnull:
             with contextlib.redirect_stdout(devnull):
-
-
+                
                 # Check if .fit_transform() was called before
                 if self.fitted is False:
                     raise Exception("Transformers weren't fitted. Please call .fit_transform() on train data first.")
@@ -904,7 +1009,7 @@ class PreprocessingTool:
 
                 # Drop unwanted columns
                 X, dtypes_list = self._get_dtypes(X)
-        
+
 
                 # Scale
                 if self.scaler is not None:
