@@ -14,7 +14,7 @@ from sklearn.utils import Bunch
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, root_mean_squared_error
 from sklearn.linear_model import ElasticNet, ElasticNetCV, LogisticRegression, Ridge
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import cross_val_score, KFold
 from sklearn.metrics import make_scorer
 
 import optuna
@@ -27,13 +27,27 @@ from xgboost import XGBRegressor, XGBClassifier
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.linear_model import SGDRegressor, SGDClassifier
 from sklearn.ensemble import VotingClassifier, VotingRegressor
+from sklearn.preprocessing import MinMaxScaler
 
+
+class RankAveragingEnsemble:
+    def __init__(self, estimators):
+        self.estimators = estimators
+    def predict(self, X):
+        # Get predictions from each estimator
+        all_preds = [model.predict(X) for _, model in self.estimators]
+        # Convert each set of predictions to rank values
+        ranked_preds = np.array([rankdata(pred) for pred in all_preds])   
+        # Return the sum of ranks across models (instead of the mean)
+        return np.sum(ranked_preds, axis=0)
+    
+    
 possible_models = [LGBMRegressor, LGBMClassifier,
                    CatBoostRegressor, CatBoostClassifier,
                    XGBRegressor, XGBClassifier,
                    RandomForestRegressor, RandomForestClassifier,
                    SGDRegressor, SGDClassifier,
-                   VotingRegressor, VotingClassifier,
+                   VotingRegressor, RankAveragingEnsemble, VotingClassifier,
                    ElasticNet, ElasticNetCV, LogisticRegression, Ridge]
 
 
@@ -44,13 +58,15 @@ import pandas as pd
 from pandas.errors import SettingWithCopyWarning
 warnings.simplefilter(action="ignore", category=SettingWithCopyWarning)
 import numpy as np
+from scipy.stats import rankdata
 
 
 import os
 import dill
+from joblib import Parallel, delayed
 import re
 import gc
-from typing import Union, Dict, Optional, Tuple
+from typing import Union, Dict, Optional, Tuple, Literal
 from contextlib import contextmanager
 import contextlib
 @contextmanager
@@ -85,6 +101,7 @@ class Trainer:
                  select_top = 3,
                  train_meta = True,
                  meta_timeout = 600,
+                 ensemble_method: Optional[Literal["weighted", "mean", "rank"]] = "weighted",
                  save_path = None):
         
         
@@ -95,14 +112,14 @@ class Trainer:
 
             Parameters:
 
-                dataset (TabularDataset): A TabularAML TabularDataset instance with your data.
+                * dataset (TabularDataset): A TabularAML TabularDataset instance with your data.
                 Used in CV hyperparam-tuning (with early stopping) and for refitting models at end on
                 the entire data.
 
-                eval_dataset (TabularDataset): A TabularDataset used exclusively for evaluation
+                * eval_dataset (TabularDataset): A TabularDataset used exclusively for evaluation
                 purposes: generating final leaderboard (including Ensemble model(s)).
 
-                eval_metric (Scorer | str): A Scorer instance with the eval metric chosen to be used 
+                * eval_metric (Scorer | str): A Scorer instance with the eval metric chosen to be used 
                                             during training for optimization (early stopping) and for evaluation, logging and
                                             ranking purposes.
                                             Can be an abbreviation of a common loss / score, such as "rmse", "rmsle",
@@ -110,7 +127,7 @@ class Trainer:
                                             If no eval_metric is provided, "rmse" will be used by default.  
 
 
-                early_stopping_rounds (int): Stops training after specified rounds without validation improvement. 
+                * early_stopping_rounds (int): Stops training after specified rounds without validation improvement. 
                                              Used for faster training, allowing a deeper exploration of the search space,
                                              possibly at the expense of full reproducibility of validation performance
                                              on the test set.
@@ -119,13 +136,13 @@ class Trainer:
                                                       Consider using `of_mitigation_level` instead for more stable performance.
                                                       Default: 0 (disabled).
 
-                of_mitigation_level (float): Recommended way to prevent overfitting, while also avoiding underfitting.
+                * of_mitigation_level (float): Recommended way to prevent overfitting, while also avoiding underfitting.
                                              Penalizes train-validation metric gap during Optuna optimization.
                                              Helps control overfitting without affecting model depth.
                                              Use with disabled early stopping for more consistent results.
                                              Default: 0.2.
 
-                models (list): List of models to use. Select from:
+                * models (list): List of models to use. Select from:
                                     * "LGB" for LGBMRegressor / LGBMClassifier
                                     * "CAT" for CatBoostRegressor / CatBoostClassifier
                                     * "XGB" for XGBRegressor / XGBClassifer
@@ -133,7 +150,7 @@ class Trainer:
                                     * "SGD_LINEAR" for SGDRegressor / SGDClassifier
                                 Default is ["LGB", "XGB", "CAT", "RF", "SGD_LINEAR"].
 
-                hyperparams (dict): A dictionary of dictionaries with default hyperparameter search space for each model.
+                * hyperparams (dict): A dictionary of dictionaries with default hyperparameter search space for each model.
                                     Each model dictionary has the following structure:
                                     Key format: hyperparam name, as expected by the model's constructor.
                                     Value format can be:
@@ -145,35 +162,39 @@ class Trainer:
                                             * (categories_list, "cat") for categorical params. 
                                     Additional param: model's time "priority"
                 
-                use_gpu (bool): Whether to use any GPU for training.
-                                Default is True.
+                * use_gpu (bool): Whether to use any GPU for training.
+                                  Default is True.
 
-                use_cuda (bool): Whether to use Nvidia CUDA GPU training.
-                                 Defaults to True.
+                * use_cuda (bool): Whether to use Nvidia CUDA GPU training.
+                                   Defaults to True.
 
-                n_trials (int): Number of trials to perform in the Optuna Study.
-                                Default is 1000 (as high as possible).
+                * n_trials (int): Number of trials to perform in the Optuna Study.
+                                  Default is 10000 (as high as possible).
 
-                timeout (int): Number of seconds after which all GBMs models tuning stops automatically.
-                               Default is 3000s or 50 mins.
-                               Default is 3000s or 50 mins.
+                * timeout (int): Number of seconds after which all GBMs models tuning stops automatically.
+                                 Default is 3000s or 50 mins.
 
-                seed (int): Random state seed to use for training the model. It ensures a level of reproducibility.
-                            Default is 42.
+                * seed (int): Random state seed to use for training the model. It ensures a level of reproducibility.
+                              Default is 42.
 
-                select_top (int): Select best x models for each model type, as determined by Optuna.
-                                  Default is 3.
+                * select_top (int): Select best x models for each model type, as determined by Optuna.
+                                    Default is 3.
 
-                train_meta (bool): WWhether to train meta-model on top of the best models of each kind.
-                                   Default is True.
+                * train_meta (bool): Whether to train meta-model on top of the best models of each kind.
+                                     Default is True.
 
-                meta_timeout (int): Number of seconds after which meta model study stops automatically.
-                                    Default is 600s or 10 mins.
+                * meta_timeout (int): Number of seconds after which meta model study stops automatically.
+                                      Default is 600s or 10 mins.
 
-                save_path (str): Path to save the trainer instance to. File extension needs to be .pkl.
-                                 If not set, no saving will occur.
+                * ensemble_method (str): Method for ensembling top models. Choose from:
+                                        * "weighted": Weighted averaging based on model performance.
+                                        * "mean": Simple mean averaging of model predictions.
+                                        * "rank": Rank-based averaging, where model predictions are ranked and averaged.
+                                        Default is "weighted" ("mean"?).
+
+                * save_path (str): Path to save the trainer instance to. File extension needs to be .pkl.
+                                   If not set, no saving will occur.
                 
-
 
         """
         
@@ -192,6 +213,7 @@ class Trainer:
         self.select_top = select_top
         self.train_meta = train_meta
         self.meta_timeout = meta_timeout
+        self.ensemble_method = ensemble_method
         self.save_path = save_path
 
         self.processed_data = None
@@ -218,6 +240,7 @@ class Trainer:
         self.meta_study = None
         self.meta_dict = None
         self.meta_learner = None
+        self.meta_scaler = None
 
         
         
@@ -500,7 +523,6 @@ class Trainer:
 
 
 
-
     def _train_best_on_folds(self):
         """
         Retrains best (select_top) models of each model type on each fold.
@@ -508,52 +530,63 @@ class Trainer:
         """
         self.meta_dict = {}
 
-        # Add models as keys with initial value None using ID column
-        for df in [self.xgb_lb, self.lgb_lb, self.cat_lb, self.rf_lb, self.sgd_lin_lb]:
-            if df is not None:
-                for _, row in df.head(self.select_top).iterrows():
-                    model_id = row["id"]  # Use the ID column value
-                    self.meta_dict[model_id] = {"model": row["model"], "oof_preds": None}
+        # Initialize meta_dict with top models
+        for lb in [self.xgb_lb, self.lgb_lb, self.cat_lb, self.rf_lb, self.sgd_lin_lb]:
+            if lb is not None:
+                for _, row in lb.head(self.select_top).iterrows():
+                    model_id = row["id"]
+                    self.meta_dict[model_id] = {
+                        "model": row["model"],
+                        "oof_preds": None
+                    }
 
-        # Fit models and store OOF predictions and ground truth labels
-        for model_id, model_info in self.meta_dict.items():
-            model = model_info["model"]
-            all_oof_preds = []
-            all_ground_truths = []
+        # Loop folds and collect OOF predictions + ground truths
+        for model_id, info in self.meta_dict.items():
+            model = info["model"]
+            all_oof = []
+            all_truth = []
+
             for fold in self.processed_data["data"]:
-                # Fit model on training data
-                model.fit(fold["train"][0], fold["train"][1])
-                
-                # Predict on validation data
+                X_tr, y_tr = fold["train"]
+                X_val, y_val = fold["val"]
+
+                # fit on fold
+                model.fit(X_tr, y_tr)
+
+                # predict
                 if self.dataset.preprocessor.prob_type != "regression":
-                    # pred_method = (model.predict_proba if hasattr(model, "predict_proba") else model.predict)
-                    oof_preds = model.predict_proba(fold["val"][0]).squeeze()
+                    preds = model.predict_proba(X_val)
+                    # if you only need one-class proba, you could e.g. preds[:, 1]
                 else:
-                    oof_preds = model.predict(fold["val"][0]).squeeze()
-                all_oof_preds.append(oof_preds)
-                
-                # Collect ground truth labels from validation data
-                ground_truths_fold = fold["val"][1]
-                all_ground_truths.append(ground_truths_fold)
-            
-            # Store OOF predictions and ground truth labels in the dictionaries
+                    preds = model.predict(X_val).reshape(-1, 1)
+
+                # wrap into DataFrame/Series, resetting index
+                pred_df = pd.DataFrame(preds).reset_index(drop=True)
+                truth_ser = (
+                    y_val.reset_index(drop=True)
+                    if hasattr(y_val, "reset_index")
+                    else pd.Series(y_val).reset_index(drop=True)
+                )
+
+                all_oof.append(pred_df)
+                all_truth.append(truth_ser)
+
+            # concatenate across folds
+            combined_oof = pd.concat(all_oof, ignore_index=True)
+            combined_truth = pd.concat(all_truth, ignore_index=True)
+
             self.meta_dict[model_id]["oof_preds"] = {
-                "predictions": np.concatenate(all_oof_preds),  # Combine OOF predictions
-                "ground_truths": np.concatenate(all_ground_truths)  # Combine ground truth labels
+                "predictions": combined_oof,
+                "ground_truths": combined_truth
             }
-            
-            
 
 
     def _train_meta_learner(self):
-
-
         """
-        Creates and trains an ElasticNet meta-learner using out-of-fold probabilities from various GBMs models.
-        Uses Optuna for hyperparameter optimization.
+        Creates and trains an ElasticNet meta-learner using scaled out-of-fold predictions.
+        Scales OOF predictions using MinMaxScaler.
+        Uses Optuna for hyperparameter optimization and prints detailed training information.
         """
-
-        
         # Initialize list to collect predictions and ground truth labels
         all_preds = []
         ground_truth = None
@@ -563,241 +596,173 @@ class Trainer:
             preds = data["oof_preds"]["predictions"]
             labels = data["oof_preds"]["ground_truths"]
 
-            # Set ground truth labels from the first model (since they are the same across models)
+            # Set ground truth labels from the first model (since they are consistent across models)
             if ground_truth is None:
                 ground_truth = labels
-            
+
             all_preds.append(preds)
 
-        # Ensure all predictions are 2D arrays (n_samples, 1) before stacking
-        all_preds = [preds.reshape(-1, 1) if preds.ndim == 1 else preds for preds in all_preds]
-        
-        # Convert lists to numpy arrays
-        X = np.hstack(all_preds)  # Shape (n_samples, n_models * n_predicted_values)
-        y = ground_truth  # Shape (n_samples,)
+        # Ensure predictions are aligned by index and combine them
+        X = pd.concat(all_preds, axis=1)
+        y = ground_truth
+
+        # Scale predictions using MinMaxScaler
+        self.meta_scaler = MinMaxScaler()
+        X_scaled = pd.DataFrame(self.meta_scaler.fit_transform(X), index=X.index, columns=X.columns)
 
         # Scorer
-        meta_scorer = make_scorer(self.eval_metric.score, 
-                                  greater_is_better=self.eval_metric.greater_is_better)
+        meta_scorer = self.eval_metric.score
 
         def objective(trial):
-            # Define the hyperparameters to optimize
             alpha = trial.suggest_float('alpha', 1e-6, 100.0, log=True)
             l1_ratio = trial.suggest_float('l1_ratio', 0.0, 1.0)
             max_iter = trial.suggest_int('max_iter', 1000, 20000, log=True)
 
-            # Create an ElasticNet model
-            model = ElasticNet(alpha=alpha, 
-                            l1_ratio=l1_ratio, 
-                            max_iter=max_iter,
-                            random_state=self.seed)
+            model = ElasticNet(
+                alpha=alpha,
+                l1_ratio=l1_ratio,
+                max_iter=max_iter,
+                random_state=self.seed
+            )
 
-            # Perform cross-validation
-            warnings.simplefilter('ignore', sklearn.exceptions.ConvergenceWarning)
-            score = cross_val_score(model, X, y, cv=self.dataset.preprocessor.n_folds, scoring=meta_scorer, 
-                                    # n_jobs=-1
-                                    )
+            # Cross-validation
+            cv = KFold(n_splits=self.dataset.preprocessor.n_folds, shuffle=True, random_state=self.seed)
 
-            # Return the mean score
-            return score.mean()
+            # Function to compute train and validation scores
+            def process_split(train_idx, val_idx):
+                X_train, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
+                y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
-        # Create a study object and optimize the objective function
+                model.fit(X_train, y_train)
+                y_train_pred = model.predict(X_train)
+                y_val_pred = model.predict(X_val)
+
+                # ElasticNet outputs continuous values; convert to class labels for classification
+                if self.pb_type != "regression":
+                    n_classes = len(np.unique(y))
+                    y_train_pred = np.clip(np.round(y_train_pred), 0, n_classes - 1).astype(int)
+                    y_val_pred = np.clip(np.round(y_val_pred), 0, n_classes - 1).astype(int)
+
+                train_score = meta_scorer(y_train, y_train_pred)
+                val_score = meta_scorer(y_val, y_val_pred)
+
+                return train_score, val_score
+
+            results = Parallel(n_jobs=-1)(
+                delayed(process_split)(train_idx, val_idx) for train_idx, val_idx in cv.split(X_scaled, y)
+            )
+
+            train_scores, val_scores = zip(*results)
+            trial.set_user_attr("mean_train_score", np.mean(train_scores))
+            return np.mean(val_scores)
+
+        # Optimize using Optuna
         self.meta_study = optuna.create_study(
-            direction='maximize',
+            direction='maximize' if self.eval_metric.greater_is_better else "minimize",
             sampler=optuna.samplers.TPESampler(multivariate=True),
             pruner=optuna.pruners.MedianPruner()
         )
         self.meta_study.optimize(objective, timeout=self.meta_timeout)
 
-        # Get the best parameters
+        # Get best parameters and scores
         best_params = self.meta_study.best_params
+        best_trial = self.meta_study.best_trial
+        mean_train_score = best_trial.user_attrs["mean_train_score"]
+        mean_val_score = self.meta_study.best_value
 
-        # Train the final model with the best parameters
-        final_model = ElasticNet(alpha=best_params['alpha'], 
-                                l1_ratio=best_params['l1_ratio'], 
-                                max_iter=best_params['max_iter'], 
-                                random_state=self.seed)
-        final_model.fit(X, y)
+        # Train final model with best parameters
+        self.meta_learner = ElasticNet(**best_params, random_state=self.seed)
+        self.meta_learner.fit(X_scaled, y)
 
+        # Final prints
         print("Done:")
         print(f"Number of models tried by Optuna: {len(self.meta_study.trials)}.")
         print("Best ElasticNet parameters:", best_params)
-        print(f"Best {self.eval_metric.name} score:", self.meta_study.best_value)
-
-        self.meta_learner = final_model
-
+        print(f"Best mean train {self.eval_metric.name} score:", mean_train_score)
+        print(f"Best mean val {self.eval_metric.name} score:", mean_val_score)
 
 
 
 
-    # def _train_meta_learner(self):
-    # 
-    #     """
-    #     Creates and trains an ElasticNetCV meta-learner using out-of-fold probabilities from various GBMs models.
-    #     Then refits the best ElasticNet model (without cross-validation) on the full dataset.
-    #     """
-        
-    #     # Initialize list to collect predictions and ground truth labels
-    #     all_preds = []
-    #     ground_truth = None
-
-    #     # Extract predictions and ground truth from the meta_dict dictionary
-    #     for model_key, data in self.meta_dict.items():
-    #         preds = data["oof_preds"]["predictions"]
-    #         labels = data["oof_preds"]["ground_truths"]
-
-    #         # Set ground truth labels from the first model (since they are the same across models)
-    #         if ground_truth is None:
-    #             ground_truth = labels
-            
-    #         all_preds.append(preds)
-
-    #     # Ensure all predictions are 2D arrays (n_samples, 1) before stacking
-    #     all_preds = [preds.reshape(-1, 1) if preds.ndim == 1 else preds for preds in all_preds]
-        
-    #     # Convert lists to numpy arrays
-    #     X = np.hstack(all_preds)  # Shape (n_samples, n_models * n_predicted_values)
-    #     y = ground_truth  # Shape (n_samples,)
-
-    #     # Train ElasticNetCV with cross-validation to find the best parameters
-    #     elasticnet_cv = ElasticNetCV(
-    #         l1_ratio=np.linspace(1e-5, 1.0, 500),
-    #         n_alphas=1000,  # Number of alphas to try
-    #         cv=self.dataset.preprocessor.n_folds,  # Cross-validation folds
-    #         max_iter=10000,
-    #         random_state=self.seed,
-    #         # n_jobs=-1  # Parallelization
-    #     )
-        
-    #     # Fit the ElasticNetCV model
-    #     elasticnet_cv.fit(X, y)
-
-        
-    #     # Refit ElasticNet model using the best-found parameters, but without CV
-    #     final_model = ElasticNet(
-    #         alpha=elasticnet_cv.alpha_,
-    #         l1_ratio=elasticnet_cv.l1_ratio_,
-    #         max_iter=10000,
-    #         random_state=self.seed
-    #     )
-
-    #     # Scorer
-    #     meta_scorer = make_scorer(self.eval_metric.score, 
-    #                               greater_is_better=self.eval_metric.greater_is_better)
-
-    #     # Calculate mean cross-validated score using a desired scoring metric
-    #     mean_cv_score = cross_val_score(final_model, X, y, cv=self.dataset.preprocessor.n_folds, scoring=meta_scorer, n_jobs=-1).mean()
-
-    #     # Print cross-validated results
-    #     print("Done:")
-    #     print(f"Best alpha: {elasticnet_cv.alpha_}")
-    #     print(f"Best l1_ratio: {elasticnet_cv.l1_ratio_}")
-    #     print(f"Mean cross-validation {self.eval_metric.name} score:", mean_cv_score)
-
-        
-    #     # Refit on the entire dataset without cross-validation
-    #     final_model.fit(X, y)
-
-    #     # Store the final trained model
-    #     self.meta_learner = final_model
-
-
-
-    
     def predict_meta(self, X):
         """
-        Makes predictions using the trained meta-learner.
-        
-        Args:
-        X (array-like): The input data to predict on.
-        
-        Returns:
-        array-like: The predictions from the meta-learner.
+        Makes predictions using the trained meta-learner with scaled input probabilities.
         """
-
-        # Get predictions from all base models
         all_preds = []
         for model_id in self.meta_dict.keys():
             model = self.meta_dict[model_id]["model"]
             if self.dataset.preprocessor.prob_type != "regression":
-                # pred_method = (model.predict_proba if hasattr(model, "predict_proba") else model.predict)
                 preds = model.predict_proba(X)
             else:
                 preds = model.predict(X).reshape(-1, 1)
             all_preds.append(preds)
 
-        # Combine predictions
+        # Combine predictions and scale them using the stored scaler
         X_meta = np.hstack(all_preds)
+        X_meta_scaled = self.meta_scaler.transform(X_meta)
 
         # Make final prediction using meta-learner
-        final_predictions = self.meta_learner.predict(X_meta)
+        final_predictions = self.meta_learner.predict(X_meta_scaled)
         if self.dataset.preprocessor.prob_type != "regression":
-            final_predictions = np.round(final_predictions)
+            n_classes = len(self.dataset.preprocessor.label_encoder.classes_)
+            final_predictions = np.clip(np.round(final_predictions), 0, n_classes - 1).astype(int)
         return final_predictions
-
-
+        
 
 
     def _train_best_on_full_train_data(self):
-
         """
         Retrains best (select_top) models of each model type on the entire train dataset.
         Updates the models in the leaderboards and the meta_dict dictionary.
         """
+        # get full train
+        self.X_train_full, self.y_train_full = (
+            self.dataset.preprocessor.transform(self.dataset.df, fit=True)
+        )
 
-        self.X_train_full, self.y_train_full = self.dataset.preprocessor.transform(self.dataset.df, fit=True)
-    
-        
-        self.all_lbs = [self.xgb_lb, self.lgb_lb, self.cat_lb, self.rf_lb, self.sgd_lin_lb]
-        
-        for leaderboard in self.all_lbs:
-            if leaderboard is not None:
-                df = leaderboard.head(self.select_top)
-                
-                for idx, row in df.iterrows():
-                    # Retrain the model
-                    retrained_model = row['model'].fit(self.X_train_full, 
-                                                       self.y_train_full)
-                    
-                    # Update the model in the leaderboard
-                    df.at[idx, 'model'] = retrained_model
-                    
-                    # Update meta_dict with retrained model
+        for lb in [self.xgb_lb, self.lgb_lb, self.cat_lb, self.rf_lb, self.sgd_lin_lb]:
+            if lb is not None:
+                top_df = lb.head(self.select_top)
+                for idx, row in top_df.iterrows():
+                    retrained = row["model"].fit(self.X_train_full, self.y_train_full)
+                    top_df.at[idx, "model"] = retrained
+
+                    # sync into meta_dict
                     model_id = row["id"]
                     if model_id in self.meta_dict:
-                        self.meta_dict[model_id]["model"] = retrained_model
+                        self.meta_dict[model_id]["model"] = retrained
 
+                # write back updated models
+                lb.update(top_df)
 
-        
+    
     def _train_best_on_whole_data(self):
-
         """
         Retrains best (select_top) models of each model type on the entire available data.
         This includes both train and external eval datasets.
-        Updates the models in the global leaderboard
+        Updates the models in the global leaderboard.
         """
-
+        # combine train + eval
         self.whole_df = pd.concat([self.dataset.df, self.eval_dataset.df], axis=0)
-        self.X_train_whole, self.y_train_whole = self.dataset.preprocessor.transform(self.whole_df, fit=True)     
-                
+        self.X_train_whole, self.y_train_whole = (
+            self.dataset.preprocessor.transform(self.whole_df, fit=True)
+        )
+
+        # retrain every model in the global leaderboard
         for idx, row in self.leaderboard.iterrows():
-            # Retrain the model
-            retrained_model = row['model'].fit(self.X_train_whole, 
-                                                self.y_train_whole)
-            
-            # Update the model in the leaderboard
-            self.leaderboard.at[idx, 'model'] = retrained_model
-            
-            # Update meta_dict with retrained model
+            retrained = row["model"].fit(self.X_train_whole, self.y_train_whole)
+            self.leaderboard.at[idx, "model"] = retrained
+
+            # sync into meta_dict
             model_id = row["id"]
             if model_id in self.meta_dict:
-                self.meta_dict[model_id]["model"] = retrained_model
+                self.meta_dict[model_id]["model"] = retrained
+
+        # rebuild voting ensemble with retrained base models
+        self.ensemble = self.get_ensemble()
+
+
         
-        self.ensemble = self.get_ensemble() # replace VotingModel estimators with retrained base models
-
-
-
-
     def get_leaderboard(self) -> pd.DataFrame:
 
         """
@@ -826,56 +791,73 @@ class Trainer:
         
         return leaderboard
     
-
-
     
-    def get_ensemble(self) -> Union[VotingRegressor, VotingClassifier]:
 
+
+
+    def get_ensemble(self):
         """
-        
-        Generates and returns a Sklearn VotingRegressor / VotingClasssifier ensemble model
-        from top models, as found by Optuna.
-
+        Generates and returns an ensemble model based on the specified ensemble method.
+        For "rank" method, performs rank-averaging instead of using VotingRegressor/Classifier.
+        Otherwise, reintroduces the older code to create and augment the Voting ensemble.
         """
-
         estimators = list(zip(self.leaderboard.id.values, self.leaderboard.model.values))
 
-        if self.eval_metric.greater_is_better:
-            weights = self.leaderboard[self.user_attrs[-1]] / sum(self.leaderboard[self.user_attrs[-1]]) 
+        if self.ensemble_method == "rank":
+            # --- RANK LOGIC (short-circuits here) ---
+            return RankAveragingEnsemble(estimators)
         else:
-            # inverse for losses, to give higher weights to models with lower loss
-            weights = 1 / self.leaderboard[self.user_attrs[-1]] / sum(1 / self.leaderboard[self.user_attrs[-1]]) 
+            # --- For "weighted" or "mean", reintroduce your old snippet. ---
 
-        # Handle both tasks types   
+            # 1) Compute weights if "weighted"
+            #    If "mean", weights will be None, leading to uniform weighting
+            if self.ensemble_method == "weighted":
+                if self.eval_metric.greater_is_better:
+                    weights = (
+                        self.leaderboard[self.user_attrs[-1]]
+                        / sum(self.leaderboard[self.user_attrs[-1]])
+                    )
+                else:
+                    # Invert for lower-is-better metrics
+                    weights = (
+                        1 / self.leaderboard[self.user_attrs[-1]]
+                        / sum(1 / self.leaderboard[self.user_attrs[-1]])
+                    )
+            elif self.ensemble_method == "mean":
+                weights = None
+            else:
+                raise ValueError("Invalid ensemble_method. Choose from 'weighted', 'mean', or 'rank'.")
 
-        if self.pb_type == "regression":
+            # 2) Create the voting ensemble model
+            if self.pb_type == "regression":
+                ensemble_model = VotingRegressor(estimators=estimators, weights=weights)
+            else:
+                ensemble_model = VotingClassifier(estimators=estimators, weights=weights, voting="soft")
 
-            ensemble_model = VotingRegressor(estimators = estimators, 
-                                             weights = weights)
-        else:
-            ensemble_model = VotingClassifier(estimators = estimators, 
-                                              weights = weights, 
-                                              voting = "soft")
-            
+                # Adding additional class params to mark model as fitted
+                ensemble_model.le_ = self.dataset.preprocessor.label_encoder
+                ensemble_model.classes_ = ensemble_model.le_.classes_
 
-        # Adding additional class params to mark model as fitted
-            ensemble_model.le_ = self.dataset.preprocessor.label_encoder
-            ensemble_model.classes_ = ensemble_model.le_.classes_
-            
-        ensemble_model.estimators_ = self.leaderboard.model.values
-        ensemble_model.named_estimators_ = Bunch()
+            # 3) Set the attributes as in your old code
+            ensemble_model.estimators_ = self.leaderboard.model.values
+            ensemble_model.named_estimators_ = Bunch()
+            for name, est in estimators:
+                ensemble_model.named_estimators_[name] = est
 
-        for name, est in estimators:
-            ensemble_model.named_estimators_[name] = est
+            # 4) Optional: Store feature information if you want to mark them as fitted
+            #    (Adapt indices and columns for your actual data)
+            ensemble_model.__dict__["n_features_in_"] = len(
+                self.processed_data["data"][0]["train"][0].iloc[0]
+            )
+            ensemble_model.__dict__["feature_names_in_"] = np.array(
+                list(self.processed_data["data"][0]["train"][0].columns)
+            )
 
-        ensemble_model.__dict__["n_features_in_"] = len(self.processed_data["data"][0]["train"][0].iloc[0])
-        ensemble_model.__dict__["feature_names_in_"] = np.array(list(self.processed_data["data"][0]["train"][0].columns))
+            # 5) Attach a custom_predict if needed
+            ensemble_model._predict = custom_predict.__get__(ensemble_model)
 
-        ensemble_model._predict = custom_predict.__get__(ensemble_model)
+            return ensemble_model
 
-        return ensemble_model
-    
-    
 
 
 
@@ -1099,10 +1081,122 @@ class Trainer:
         return preds
     
 
-    def dump(self, file_path):
-        with open(file_path, "wb") as f:
-            dill.dump(self, f)
+    def dump(self, path: str) -> None:
+        """
+        Save the entire trainer state, including:
+        - Initialization arguments (models, hyperparams, etc.)
+        - Fitted models and leaderboards
+        - Preprocessing or meta-learner details
+        """
+        # Put whatever you need for re-loading the trainer into a dictionary:
+        state = {
+            # Basic init args
+            "dataset": self.dataset,  # includes self.dataset.preprocessor
+            "eval_dataset": self.eval_dataset,
+            "eval_metric": self.eval_metric,
+            "early_stopping_rounds": self.early_stopping_rounds,
+            "of_mitigation_level": self.of_mitigation_level,
+            "models": self.models,
+            "hyperparams": self.hyperparams,
+            "use_gpu": self.use_gpu,
+            "use_cuda": self.use_cuda,
+            "n_trials": self.n_trials,
+            "timeout": self.timeout,
+            "seed": self.seed,
+            "select_top": self.select_top,
+            "train_meta": self.train_meta,
+            "meta_timeout": self.meta_timeout,
+            "ensemble_method": self.ensemble_method,
+            "save_path": self.save_path,
 
-    def load(self, file_path):
-        with open(file_path, "rb") as f:
-            self = dill.load(f)
+            # Internal trainer attributes from training
+            "processed_data": self.processed_data,
+            "mode": self.mode,
+            "pb_type": self.pb_type,
+            "user_attrs": self.user_attrs,
+
+            "lgb_lb": self.lgb_lb,
+            "cat_lb": self.cat_lb,
+            "xgb_lb": self.xgb_lb,
+            "rf_lb": self.rf_lb,
+            "sgd_lin_lb": self.sgd_lin_lb,
+            "leaderboard": self.leaderboard,
+            "eval_lb": self.eval_lb,
+            "ensemble": self.ensemble,
+            "best_model": self.best_model,
+
+            "X_train_full": self.X_train_full,
+            "y_train_full": self.y_train_full,
+            "X_eval": self.X_eval,
+            "y_eval": self.y_eval,
+
+            "meta_study": self.meta_study,
+            "meta_dict": self.meta_dict,
+            "meta_learner": self.meta_learner,
+            "meta_scaler": self.meta_scaler,
+        }
+
+        with open(path, "wb") as f:
+            dill.dump(state, f)
+        print(f"Trainer successfully dumped to {path}.")
+
+
+    @classmethod
+    def load(cls, path: str):
+        """
+        Load an entire Trainer from disk, restoring all
+        attributes such that it can be used for inference
+        or further usage.
+        """
+        with open(path, "rb") as f:
+            state = dill.load(f)
+
+        # Re-create the Trainer with the same init arguments
+        trainer = cls(
+            dataset=state["dataset"],
+            eval_dataset=state["eval_dataset"],
+            eval_metric=state["eval_metric"],
+            early_stopping_rounds=state["early_stopping_rounds"],
+            of_mitigation_level=state["of_mitigation_level"],
+            models=state["models"],
+            hyperparams=state["hyperparams"],
+            use_gpu=state["use_gpu"],
+            use_cuda=state["use_cuda"],
+            n_trials=state["n_trials"],
+            timeout=state["timeout"],
+            seed=state["seed"],
+            select_top=state["select_top"],
+            train_meta=state["train_meta"],
+            meta_timeout=state["meta_timeout"],
+            ensemble_method=state["ensemble_method"],
+            save_path=state["save_path"],
+        )
+
+        # Restore any internal trainer fields
+        trainer.processed_data = state["processed_data"]
+        trainer.mode = state["mode"]
+        trainer.pb_type = state["pb_type"]
+        trainer.user_attrs = state["user_attrs"]
+
+        trainer.lgb_lb = state["lgb_lb"]
+        trainer.cat_lb = state["cat_lb"]
+        trainer.xgb_lb = state["xgb_lb"]
+        trainer.rf_lb = state["rf_lb"]
+        trainer.sgd_lin_lb = state["sgd_lin_lb"]
+        trainer.leaderboard = state["leaderboard"]
+        trainer.eval_lb = state["eval_lb"]
+        trainer.ensemble = state["ensemble"]
+        trainer.best_model = state["best_model"]
+
+        trainer.X_train_full = state["X_train_full"]
+        trainer.y_train_full = state["y_train_full"]
+        trainer.X_eval = state["X_eval"]
+        trainer.y_eval = state["y_eval"]
+
+        trainer.meta_study = state["meta_study"]
+        trainer.meta_dict = state["meta_dict"]
+        trainer.meta_learner = state["meta_learner"]
+        trainer.meta_scaler = state["meta_scaler"]
+
+        print(f"Trainer successfully loaded from {path}.")
+        return trainer
