@@ -630,7 +630,7 @@ class Trainer:
 
             # Function to compute train and validation scores
             def process_split(train_idx, val_idx):
-                X_train, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
+                X_train, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx] #update
                 y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
                 model.fit(X_train, y_train)
